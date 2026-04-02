@@ -1,0 +1,38 @@
+export const CELO_BLOOM_ABI = [
+  {
+    type: "function",
+    name: "waterTree",
+    stateMutability: "nonpayable",
+    inputs: [],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "sendSunlight",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "to", type: "address" }],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "claimReward",
+    stateMutability: "nonpayable",
+    inputs: [],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "users",
+    stateMutability: "view",
+    inputs: [{ name: "user", type: "address" }],
+    outputs: [
+      { name: "streakCount", type: "uint32" },
+      { name: "lastWateredAt", type: "uint64" },
+      { name: "growthLevel", type: "uint32" },
+      { name: "totalActions", type: "uint32" },
+      { name: "sunlightSent", type: "uint32" },
+      { name: "sunlightReceived", type: "uint32" },
+      { name: "lastClaimedWeek", type: "uint64" },
+    ],
+  },
+];

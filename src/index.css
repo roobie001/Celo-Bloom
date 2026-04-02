@@ -1,0 +1,35 @@
+@import url("https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Space+Grotesk:wght@400;500;600&display=swap");
+
+:root {
+  font-family: var(--body-font);
+  line-height: 1.5;
+  font-weight: 400;
+  color-scheme: light;
+
+  --body-font: "Space Grotesk", "Segoe UI", sans-serif;
+  --title-font: "Orbitron", "Segoe UI", sans-serif;
+  --bg: radial-gradient(circle at top, #102b25, #050e0c 70%);
+  --card: rgba(8, 20, 18, 0.88);
+  --text: #f1fff7;
+  --muted: rgba(209, 240, 224, 0.7);
+  --accent: #7cffc2;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #071411;
+}
+
+button,
+input {
+  font-family: inherit;
+}
+
+input::placeholder {
+  color: rgba(209, 240, 224, 0.55);
+}
