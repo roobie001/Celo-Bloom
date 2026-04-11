@@ -8,8 +8,8 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "deploy:alfajores": "hardhat run scripts/deploy.js --network alfajores",
-    "deploy:mainnet": "hardhat run scripts/deploy.js --network celo",
+    "deploy:alfajores": "hardhat run scripts/deploy.cjs --network alfajores",
+    "deploy:mainnet": "hardhat run scripts/deploy.cjs --network celo",
     "test:alfajores": "hardhat run scripts/testCore.js --network alfajores"
   },
   "dependencies": {

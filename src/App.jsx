@@ -1,17 +1,58 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import { createPublicClient, createWalletClient, custom, http } from "viem";
-import { celo } from "viem/chains";
 import { CELO_BLOOM_ABI } from "./abi/celoBloomAbi";
 import { useMiniPay } from "./hooks/useMiniPay";
 import { shortAddress } from "./utils/format";
 
-const CELO_CHAIN_ID = 42220;
-const DEFAULT_RPC = "https://forno.celo.org";
+const CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID);
+const RPC_URL = import.meta.env.VITE_CELO_RPC_URL;
+
+const NETWORKS = {
+  42220: { name: "Celo Mainnet", explorer: "https://celoscan.io" },
+  44787: { name: "Celo Alfajores", explorer: "https://alfajores.celoscan.io" },
+  44844: { name: "Celo Sepolia", explorer: "https://sepolia.celoscan.io" },
+  11142220: { name: "Celo Sepolia", explorer: "https://sepolia.celoscan.io" },
+};
 
 const contractAddress =
-  import.meta.env.VITE_CELO_BLOOM_ADDRESS || "0x0000000000000000000000000000000000000000";
-const rpcUrl = import.meta.env.VITE_CELO_RPC_URL || DEFAULT_RPC;
+  import.meta.env.VITE_BLOOM_ADDRESS ||
+  "0x0000000000000000000000000000000000000000";
+
+const client = createPublicClient({
+  chain: {
+    id: CHAIN_ID,
+    name: "Celo Custom",
+    network: "celo",
+    nativeCurrency: {
+      name: "CELO",
+      symbol: "CELO",
+      decimals: 18,
+    },
+    rpcUrls: {
+      default: {
+        http: [RPC_URL],
+      },
+    },
+  },
+  transport: http(RPC_URL),
+});
+
+const networkConfig = NETWORKS[CHAIN_ID] || {
+  name: `Chain ${CHAIN_ID}`,
+  explorer: "https://celoscan.io",
+};
+const activeChain = {
+  id: CHAIN_ID,
+  name: networkConfig.name,
+  nativeCurrency: { name: "CELO", symbol: "CELO", decimals: 18 },
+  rpcUrls: {
+    default: { http: [RPC_URL] },
+  },
+  blockExplorers: {
+    default: { name: "Explorer", url: networkConfig.explorer },
+  },
+};
 
 const milestoneLabels = {
   3: "Seedling",
@@ -26,12 +67,24 @@ const initialLeaderboard = [
   { rank: 4, name: "0x11F0...F00D", streak: 4, growth: 2, txs: 18 },
 ];
 
+function safeNumber(value) {
+  if (value === undefined || value === null) return 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function getDayId(tsSeconds) {
   return Math.floor(tsSeconds / 86400);
 }
 
 function getWeekId(tsSeconds) {
   return Math.floor(tsSeconds / 604800);
+}
+
+function formatTimestamp(tsSeconds) {
+  if (!tsSeconds) return "--";
+  const date = new Date(tsSeconds * 1000);
+  return date.toLocaleString();
 }
 
 function stageForGrowth(growthLevel) {
@@ -41,62 +94,166 @@ function stageForGrowth(growthLevel) {
   return "seed";
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isResourceUnavailableError(error) {
+  let current = error;
+  while (current) {
+    if (
+      current.name === "ResourceUnavailableRpcError" ||
+      current.name === "HttpRequestError" ||
+      current.code === -32002
+    ) {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
+}
+
 export default function App() {
-  const { provider, address, chainId, status, connect } = useMiniPay();
+  const {
+    provider,
+    address,
+    chainId,
+    status,
+    connect,
+    disconnect,
+    refreshChain,
+    switchChain,
+  } = useMiniPay();
   const [user, setUser] = useState(null);
   const [busyAction, setBusyAction] = useState("");
   const [txHash, setTxHash] = useState("");
   const [sunlightTo, setSunlightTo] = useState("");
   const [leaderboard, setLeaderboard] = useState(initialLeaderboard);
+  const [toast, setToast] = useState(null);
+  const [rpcStatus, setRpcStatus] = useState("ok");
+  const [rpcError, setRpcError] = useState("");
+  const userCacheRef = useRef({
+    address: "",
+    timestamp: 0,
+    data: null,
+  });
+  const inFlightRefreshRef = useRef({
+    address: "",
+    promise: null,
+  });
 
-  const publicClient = useMemo(() => {
-    return createPublicClient({
-      chain: celo,
-      transport: http(rpcUrl),
-    });
-  }, [rpcUrl]);
+  const readClient = client;
 
   const walletClient = useMemo(() => {
     if (!provider) return null;
     return createWalletClient({
-      chain: celo,
+      chain: activeChain,
       transport: custom(provider),
     });
-  }, [provider]);
+  }, [provider, activeChain]);
+
+  const applyUserState = (data) => {
+    const nextUser = {
+      streakCount: safeNumber(data?.streakCount ?? data?.[0]),
+      lastWateredAt: safeNumber(data?.lastWateredAt ?? data?.[1]),
+      growthLevel: safeNumber(data?.growthLevel ?? data?.[2]),
+      totalActions: safeNumber(data?.totalActions ?? data?.[3]),
+      sunlightSent: safeNumber(data?.sunlightSent ?? data?.[4]),
+      sunlightReceived: safeNumber(data?.sunlightReceived ?? data?.[5]),
+      lastClaimedWeek: safeNumber(data?.lastClaimedWeek ?? data?.[6]),
+    };
+    console.log("User data from contract:", data, "mapped:", nextUser);
+
+    const parsed = {
+      streakCount: nextUser.streakCount,
+      lastWateredAt: nextUser.lastWateredAt,
+      growthLevel: nextUser.growthLevel,
+      totalActions: nextUser.totalActions,
+      sunlightSent: nextUser.sunlightSent,
+      sunlightReceived: nextUser.sunlightReceived,
+      lastClaimedWeek: nextUser.lastClaimedWeek,
+    };
+    setUser(parsed);
+    updateLeaderboard(parsed);
+    return parsed;
+  };
 
   const refreshUser = async () => {
     if (!address) return;
-    try {
-      const data = await publicClient.readContract({
-        address: contractAddress,
-        abi: CELO_BLOOM_ABI,
-        functionName: "users",
-        args: [address],
-      });
-      const parsed = {
-        streakCount: Number(data.streakCount),
-        lastWateredAt: Number(data.lastWateredAt),
-        growthLevel: Number(data.growthLevel),
-        totalActions: Number(data.totalActions),
-        sunlightSent: Number(data.sunlightSent),
-        sunlightReceived: Number(data.sunlightReceived),
-        lastClaimedWeek: Number(data.lastClaimedWeek),
-      };
-      setUser(parsed);
-      updateLeaderboard(parsed);
-    } catch (error) {
-      console.error(error);
+    const now = Date.now();
+    const cached = userCacheRef.current;
+    if (
+      cached.address === address &&
+      cached.data &&
+      now - cached.timestamp < 5000
+    ) {
+      applyUserState(cached.data);
+      return cached.data;
     }
+    if (
+      inFlightRefreshRef.current.address === address &&
+      inFlightRefreshRef.current.promise
+    ) {
+      return inFlightRefreshRef.current.promise;
+    }
+    const request = (async () => {
+      setRpcStatus("ok");
+      setRpcError("");
+      let data;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          data = await readClient.readContract({
+            address: contractAddress,
+            abi: CELO_BLOOM_ABI,
+            functionName: "users",
+            args: [address],
+          });
+          break;
+        } catch (error) {
+          if (!isResourceUnavailableError(error) || attempt === 2) {
+            throw error;
+          }
+          await sleep(2000 * 2 ** attempt);
+        }
+      }
+      userCacheRef.current = {
+        address,
+        timestamp: now,
+        data,
+      };
+      return applyUserState(data);
+    })()
+      .catch((error) => {
+        setRpcStatus("error");
+        setRpcError("RPC unavailable. Update VITE_RPC_URL.");
+        throw error;
+      })
+      .finally(() => {
+        if (inFlightRefreshRef.current.promise === request) {
+          inFlightRefreshRef.current = {
+            address: "",
+            promise: null,
+          };
+        }
+      });
+    inFlightRefreshRef.current = {
+      address,
+      promise: request,
+    };
+    return request;
   };
 
   const updateLeaderboard = (latestUser) => {
-    const score = latestUser.growthLevel * 10 + latestUser.totalActions + latestUser.streakCount;
+    const score =
+      safeNumber(latestUser?.growthLevel) * 10 +
+      safeNumber(latestUser?.totalActions) +
+      safeNumber(latestUser?.streakCount);
     const entry = {
       rank: 0,
       name: shortAddress(address || "0x0"),
-      streak: latestUser.streakCount,
-      growth: latestUser.growthLevel,
-      txs: latestUser.totalActions,
+      streak: safeNumber(latestUser?.streakCount),
+      growth: safeNumber(latestUser?.growthLevel),
+      txs: safeNumber(latestUser?.totalActions),
       score,
     };
     const merged = [...initialLeaderboard, entry]
@@ -108,25 +265,43 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (address) refreshUser();
-  }, [address]);
+    if (address) {
+      refreshUser().catch(() => {});
+    }
+  }, [address, readClient]);
+
+  useEffect(() => {
+    if (!address || rpcStatus === "error") return;
+    const interval = setInterval(() => {
+      refreshUser().catch(() => {});
+    }, 20000);
+    return () => clearInterval(interval);
+  }, [address, rpcStatus, readClient]);
 
   const todayId = getDayId(Math.floor(Date.now() / 1000));
-  const lastWateredId = user?.lastWateredAt ? getDayId(user.lastWateredAt) : null;
+  const lastWateredId = user?.lastWateredAt
+    ? getDayId(user.lastWateredAt)
+    : null;
   const alreadyWatered = lastWateredId === todayId;
   const isEligibleReward =
-    user?.streakCount >= 3 && (user?.lastClaimedWeek || 0) < getWeekId(Math.floor(Date.now() / 1000));
+    user?.streakCount >= 3 &&
+    (user?.lastClaimedWeek || 0) < getWeekId(Math.floor(Date.now() / 1000));
   const currentStage = stageForGrowth(user?.growthLevel || 1);
 
   const ensureWalletReady = () => {
     if (!walletClient || !address) return false;
-    return chainId === CELO_CHAIN_ID;
+    return chainId === CHAIN_ID;
   };
 
   const handleWater = async () => {
     if (!ensureWalletReady()) return;
     setBusyAction("water");
     setTxHash("");
+    setToast({
+      status: "submitted",
+      message: "Transaction submitted...",
+      hash: "",
+    });
     try {
       const hash = await walletClient.writeContract({
         address: contractAddress,
@@ -135,10 +310,27 @@ export default function App() {
         account: address,
       });
       setTxHash(hash);
-      await publicClient.waitForTransactionReceipt({ hash });
-      await refreshUser();
+      setToast({
+        status: "confirming",
+        message: "Confirming on-chain...",
+        hash,
+      });
+      await readClient.waitForTransactionReceipt({ hash });
+      userCacheRef.current = { address: "", timestamp: 0, data: null };
+      inFlightRefreshRef.current = { address: "", promise: null };
+      await refreshUser().catch(() => {});
+      setToast({
+        status: "success",
+        message: "Success - Plant watered",
+        hash,
+      });
     } catch (error) {
       console.error(error);
+      setToast({
+        status: "error",
+        message: "Transaction failed. Try again.",
+        hash: "",
+      });
     } finally {
       setBusyAction("");
     }
@@ -158,8 +350,10 @@ export default function App() {
         account: address,
       });
       setTxHash(hash);
-      await publicClient.waitForTransactionReceipt({ hash });
-      await refreshUser();
+      await readClient.waitForTransactionReceipt({ hash });
+      userCacheRef.current = { address: "", timestamp: 0, data: null };
+      inFlightRefreshRef.current = { address: "", promise: null };
+      await refreshUser().catch(() => {});
       setSunlightTo("");
     } catch (error) {
       console.error(error);
@@ -180,8 +374,10 @@ export default function App() {
         account: address,
       });
       setTxHash(hash);
-      await publicClient.waitForTransactionReceipt({ hash });
-      await refreshUser();
+      await readClient.waitForTransactionReceipt({ hash });
+      userCacheRef.current = { address: "", timestamp: 0, data: null };
+      inFlightRefreshRef.current = { address: "", promise: null };
+      await refreshUser().catch(() => {});
     } catch (error) {
       console.error(error);
     } finally {
@@ -190,7 +386,20 @@ export default function App() {
   };
 
   const showConnect = status !== "connected";
-  const chainWarning = address && chainId !== CELO_CHAIN_ID;
+  const chainWarning = address && chainId !== CHAIN_ID;
+  const networkLabel = networkConfig.name;
+  const currentNetworkLabel =
+    NETWORKS[chainId]?.name || (chainId ? `Chain ${chainId}` : "Unknown");
+  const explorerBase =
+    import.meta.env.VITE_TX_EXPLORER || `${networkConfig.explorer}/tx`;
+
+  useEffect(() => {
+    if (!toast || toast.status !== "success") return;
+    const timeout = setTimeout(() => {
+      setToast(null);
+    }, 4500);
+    return () => clearTimeout(timeout);
+  }, [toast]);
 
   return (
     <div className="app">
@@ -201,13 +410,34 @@ export default function App() {
         </div>
         <div className="wallet">
           {showConnect ? (
-            <button className="btn btn-primary" onClick={connect}>
-              Connect MiniPay
+            <button
+              className="btn btn-primary"
+              onClick={connect}
+              disabled={!provider}
+              title={
+                !provider
+                  ? "MiniPay wallet not detected"
+                  : "Click to connect your wallet"
+              }
+            >
+              {!provider ? "MiniPay Not Found" : "Connect MiniPay"}
             </button>
           ) : (
             <div className="wallet-pill">
-              <span>{shortAddress(address)}</span>
-              <span className="wallet-status">Celo Mainnet</span>
+              <div
+                style={{ display: "flex", alignItems: "center", gap: "8px" }}
+              >
+                <span>{shortAddress(address)}</span>
+                <span className="wallet-status">{currentNetworkLabel}</span>
+              </div>
+              <button
+                className="btn btn-secondary"
+                onClick={disconnect}
+                title="Disconnect wallet"
+                style={{ padding: "4px 12px", fontSize: "12px" }}
+              >
+                Disconnect
+              </button>
             </div>
           )}
         </div>
@@ -219,19 +449,30 @@ export default function App() {
             <p className="eyebrow">Daily Quest</p>
             <h1>Grow your tree with one onchain action each day.</h1>
             <p className="subtext">
-              Watering keeps your streak alive. Sunlight makes friends grow faster. Rewards are tiny but frequent.
+              Watering keeps your streak alive. Sunlight makes friends grow
+              faster. Rewards are tiny but frequent.
             </p>
 
             <div className="cta-row">
               <button
                 className="btn btn-accent"
                 onClick={handleWater}
-                disabled={busyAction || alreadyWatered || showConnect || chainWarning}
+                disabled={
+                  busyAction || alreadyWatered || showConnect || chainWarning
+                }
               >
-                {alreadyWatered ? "Watered Today" : busyAction === "water" ? "Watering..." : "Water Tree"}
+                {alreadyWatered
+                  ? "Watered Today"
+                  : busyAction === "water"
+                    ? "Watering..."
+                    : "Water Tree"}
               </button>
               <div className="cta-meta">
-                <span>{alreadyWatered ? "Come back tomorrow" : "Free daily onchain check-in"}</span>
+                <span>
+                  {alreadyWatered
+                    ? "Come back tomorrow"
+                    : "Free daily onchain check-in"}
+                </span>
                 {user?.streakCount ? (
                   <strong>Streak: {user.streakCount} days</strong>
                 ) : (
@@ -241,7 +482,51 @@ export default function App() {
             </div>
 
             {chainWarning ? (
-              <div className="notice">Switch to Celo Mainnet in MiniPay to continue.</div>
+              <div className="notice">
+                Switch to {networkLabel} in MiniPay to continue.
+              </div>
+            ) : null}
+            {rpcStatus === "error" ? (
+              <div className="notice">
+                {rpcError} Use a working Alfajores RPC and restart the dev
+                server.
+              </div>
+            ) : null}
+            <div className="chain-actions">
+              <button
+                className="btn btn-secondary"
+                onClick={() =>
+                  switchChain({
+                    chainId: CHAIN_ID,
+                    chainName: networkLabel,
+                    rpcUrl: RPC_URL,
+                    explorerUrl: explorerBase.replace("/tx", ""),
+                  })
+                }
+                disabled={!provider}
+              >
+                Switch Network
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={refreshChain}
+                disabled={!provider}
+              >
+                Refresh Network
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={refreshUser}
+                disabled={!provider || !address}
+              >
+                Retry RPC
+              </button>
+            </div>
+            {address ? (
+              <div className="chain-meta">
+                Connected chain: {currentNetworkLabel}{" "}
+                {chainId ? `(${chainId})` : ""}
+              </div>
             ) : null}
             {txHash ? <div className="txhash">Last tx: {txHash}</div> : null}
           </div>
@@ -256,7 +541,8 @@ export default function App() {
               <div className="tree-stage">
                 <span className="stage-label">{currentStage}</span>
                 <span className="stage-progress">
-                  Next milestone: {milestoneLabels[3] || "Seedling"} / {milestoneLabels[7] || "Sapling"} /{" "}
+                  Next milestone: {milestoneLabels[3] || "Seedling"} /{" "}
+                  {milestoneLabels[7] || "Sapling"} /{" "}
                   {milestoneLabels[14] || "Tree"}
                 </span>
               </div>
@@ -284,9 +570,25 @@ export default function App() {
               <strong>{user?.sunlightSent || 0}</strong>
             </div>
           </div>
+          <div className="streak-meta">
+            <div>
+              <span className="label">Last Watered</span>
+              <strong>{formatTimestamp(user?.lastWateredAt)}</strong>
+            </div>
+            <button
+              className="btn btn-secondary"
+              onClick={refreshUser}
+              disabled={busyAction}
+            >
+              Refresh Stats
+            </button>
+          </div>
           <div className="milestones">
             {[3, 7, 14].map((days) => (
-              <div key={days} className={`milestone ${user?.streakCount >= days ? "active" : ""}`}>
+              <div
+                key={days}
+                className={`milestone ${user?.streakCount >= days ? "active" : ""}`}
+              >
                 <span>{days} days</span>
                 <strong>{milestoneLabels[days]}</strong>
               </div>
@@ -297,15 +599,22 @@ export default function App() {
         <section className="card reward">
           <h2>Weekly Reward</h2>
           <p>
-            Keep a 3-day streak to unlock a micro cUSD reward. Claiming triggers an onchain transaction.
+            Keep a 3-day streak to unlock a micro cUSD reward. Claiming triggers
+            an onchain transaction.
           </p>
           <div className="reward-action">
             <button
               className="btn btn-primary"
               onClick={handleClaim}
-              disabled={busyAction || !isEligibleReward || showConnect || chainWarning}
+              disabled={
+                busyAction || !isEligibleReward || showConnect || chainWarning
+              }
             >
-              {busyAction === "claim" ? "Claiming..." : isEligibleReward ? "Claim Reward" : "Not Eligible Yet"}
+              {busyAction === "claim"
+                ? "Claiming..."
+                : isEligibleReward
+                  ? "Claim Reward"
+                  : "Not Eligible Yet"}
             </button>
             <span className="reward-hint">Minimum streak: 3 days</span>
           </div>
@@ -313,7 +622,7 @@ export default function App() {
 
         <section className="card sunlight">
           <h2>Send Sunlight</h2>
-          <p>Boost a friend’s tree and increase your own activity score.</p>
+          <p>Boost a friend's tree and increase your own activity score.</p>
           <div className="sunlight-form">
             <input
               type="text"
@@ -347,11 +656,44 @@ export default function App() {
         </section>
       </main>
 
+      {toast ? (
+        <div className={`toast toast-${toast.status}`}>
+          <div className="toast-row">
+            <span
+              className={`toast-icon toast-${toast.status}`}
+              aria-hidden="true"
+            >
+              {toast.status === "confirming"
+                ? "..."
+                : toast.status === "success"
+                  ? "OK"
+                  : toast.status === "error"
+                    ? "!"
+                    : "."}
+            </span>
+            <div className="toast-message">{toast.message}</div>
+          </div>
+          {toast.hash ? (
+            <a
+              className="toast-link"
+              href={`${explorerBase}/${toast.hash}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              View on Explorer
+            </a>
+          ) : null}
+        </div>
+      ) : null}
+
       <footer className="footer">
         <div>
-          <strong>Proof of Humanity:</strong> Ready for MiniPay’s human checks and community attestations.
+          <strong>Proof of Humanity:</strong> Ready for MiniPay's human checks
+          and community attestations.
         </div>
-        <div className="footer-note">Built for daily onchain momentum on Celo Mainnet.</div>
+        <div className="footer-note">
+          Built for daily onchain momentum on {networkLabel}.
+        </div>
       </footer>
     </div>
   );

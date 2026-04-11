@@ -109,7 +109,7 @@ contract CeloBloom {
 
     function _isNewDay(uint64 lastWateredAt, uint64 nowTs) internal pure returns (bool) {
         if (lastWateredAt == 0) return true;
-        return (lastWateredAt / DAY) < (nowTs / DAY);
+        return uint64(lastWateredAt / DAY) < uint64(nowTs / DAY);
     }
 
     function _nextStreak(
@@ -119,8 +119,8 @@ contract CeloBloom {
     ) internal pure returns (uint32) {
         if (lastWateredAt == 0) return 1;
 
-        uint64 lastDay = lastWateredAt / DAY;
-        uint64 today = nowTs / DAY;
+        uint64 lastDay = uint64(lastWateredAt / DAY);
+        uint64 today = uint64(nowTs / DAY);
 
         if (today == lastDay) return currentStreak;
         if (today == lastDay + 1) return currentStreak + 1;
