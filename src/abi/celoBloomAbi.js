@@ -22,6 +22,23 @@ export const CELO_BLOOM_ABI = [
   },
   {
     type: "function",
+    name: "getParticipantCount",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "getParticipants",
+    stateMutability: "view",
+    inputs: [
+      { name: "offset", type: "uint256" },
+      { name: "limit", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "address[]" }],
+  },
+  {
+    type: "function",
     name: "users",
     stateMutability: "view",
     inputs: [{ name: "user", type: "address" }],
@@ -34,5 +51,11 @@ export const CELO_BLOOM_ABI = [
       { name: "sunlightReceived", type: "uint32" },
       { name: "lastClaimedWeek", type: "uint64" },
     ],
+  },
+  {
+    type: "event",
+    name: "ParticipantRegistered",
+    inputs: [{ name: "user", type: "address", indexed: true }],
+    anonymous: false,
   },
 ];

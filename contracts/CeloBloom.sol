@@ -20,6 +20,8 @@ contract CeloBloom {
     }
 
     mapping(address => User) public users;
+    address[] public participants;
+    mapping(address => bool) public isParticipant;
 
     IERC20 public immutable cUSD;
     address public owner;
@@ -31,6 +33,7 @@ contract CeloBloom {
     event RewardAmountUpdated(uint256 amount);
     event OwnerUpdated(address indexed owner);
     event StreakAdjusted(address indexed user, uint32 streak);
+    event ParticipantRegistered(address indexed user);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "NOT_OWNER");
@@ -56,6 +59,8 @@ contract CeloBloom {
     }
 
     function waterTree() external {
+        _registerParticipant(msg.sender);
+
         User storage user = users[msg.sender];
         uint64 nowTs = uint64(block.timestamp);
         require(_isNewDay(user.lastWateredAt, nowTs), "ALREADY_WATERED");
@@ -71,6 +76,8 @@ contract CeloBloom {
     function sendSunlight(address to) external {
         require(to != address(0) && to != msg.sender, "BAD_RECIPIENT");
 
+        _registerParticipant(msg.sender);
+
         User storage sender = users[msg.sender];
         User storage recipient = users[to];
 
@@ -85,6 +92,8 @@ contract CeloBloom {
     }
 
     function claimReward() external {
+        _registerParticipant(msg.sender);
+
         User storage user = users[msg.sender];
         require(user.streakCount >= 3, "STREAK_TOO_LOW");
 
@@ -102,9 +111,38 @@ contract CeloBloom {
 
     // TEST-ONLY: remove before mainnet deployment.
     function setStreakForTesting(address userAddress, uint256 streak) external onlyOwner {
+        _registerParticipant(userAddress);
         users[userAddress].streakCount = uint32(streak);
         users[userAddress].growthLevel = _growthFor(users[userAddress]);
         emit StreakAdjusted(userAddress, uint32(streak));
+    }
+
+    function getParticipantCount() external view returns (uint256) {
+        return participants.length;
+    }
+
+    function getParticipants(
+        uint256 offset,
+        uint256 limit
+    ) external view returns (address[] memory) {
+        uint256 total = participants.length;
+        if (offset >= total) {
+            return new address[](0);
+        }
+
+        uint256 end = offset + limit;
+        if (end > total) {
+            end = total;
+        }
+
+        uint256 size = end - offset;
+        address[] memory page = new address[](size);
+
+        for (uint256 i = 0; i < size; i++) {
+            page[i] = participants[offset + i];
+        }
+
+        return page;
     }
 
     function _isNewDay(uint64 lastWateredAt, uint64 nowTs) internal pure returns (bool) {
@@ -143,5 +181,13 @@ contract CeloBloom {
             return base + 1;
         }
         return base;
+    }
+
+    function _registerParticipant(address userAddress) internal {
+        if (isParticipant[userAddress]) return;
+
+        isParticipant[userAddress] = true;
+        participants.push(userAddress);
+        emit ParticipantRegistered(userAddress);
     }
 }

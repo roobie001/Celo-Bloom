@@ -1,7 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
-import { createPublicClient, createWalletClient, custom, http } from "viem";
+import {
+  createPublicClient,
+  createWalletClient,
+  custom,
+  http,
+  isAddress,
+} from "viem";
 import { CELO_BLOOM_ABI } from "./abi/celoBloomAbi";
+import {
+  MILESTONE_LABELS,
+  REWARD_MIN_STREAK,
+  STREAK_MILESTONES,
+  stageForGrowth,
+} from "./config/gameConfig";
 import { useMiniPay } from "./hooks/useMiniPay";
 import { shortAddress } from "./utils/format";
 
@@ -15,9 +27,10 @@ const NETWORKS = {
   11142220: { name: "Celo Sepolia", explorer: "https://sepolia.celoscan.io" },
 };
 
-const contractAddress =
-  import.meta.env.VITE_BLOOM_ADDRESS ||
-  "0x0000000000000000000000000000000000000000";
+const contractAddress = import.meta.env.VITE_BLOOM_ADDRESS?.trim() || "";
+const configError = isAddress(contractAddress)
+  ? ""
+  : "Missing or invalid VITE_BLOOM_ADDRESS. Add a deployed contract address to your .env and restart the dev server.";
 
 const client = createPublicClient({
   chain: {
@@ -54,18 +67,7 @@ const activeChain = {
   },
 };
 
-const milestoneLabels = {
-  3: "Seedling",
-  7: "Sapling",
-  14: "Tree",
-};
-
-const initialLeaderboard = [
-  { rank: 1, name: "0x81b9...31E2", streak: 14, growth: 4, txs: 52 },
-  { rank: 2, name: "0x91D3...a9F1", streak: 9, growth: 3, txs: 38 },
-  { rank: 3, name: "0xA2c1...00b8", streak: 7, growth: 3, txs: 31 },
-  { rank: 4, name: "0x11F0...F00D", streak: 4, growth: 2, txs: 18 },
-];
+const LEADERBOARD_PAGE_SIZE = 20;
 
 function safeNumber(value) {
   if (value === undefined || value === null) return 0;
@@ -87,13 +89,6 @@ function formatTimestamp(tsSeconds) {
   return date.toLocaleString();
 }
 
-function stageForGrowth(growthLevel) {
-  if (growthLevel >= 4) return "tree";
-  if (growthLevel >= 3) return "sapling";
-  if (growthLevel >= 2) return "seedling";
-  return "seed";
-}
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -113,6 +108,38 @@ function isResourceUnavailableError(error) {
   return false;
 }
 
+function calculateLeaderboardScore(userData) {
+  return (
+    safeNumber(userData?.growthLevel) * 10 +
+    safeNumber(userData?.totalActions) +
+    safeNumber(userData?.streakCount)
+  );
+}
+
+function mapContractUser(data) {
+  return {
+    streakCount: safeNumber(data?.streakCount ?? data?.[0]),
+    lastWateredAt: safeNumber(data?.lastWateredAt ?? data?.[1]),
+    growthLevel: safeNumber(data?.growthLevel ?? data?.[2]),
+    totalActions: safeNumber(data?.totalActions ?? data?.[3]),
+    sunlightSent: safeNumber(data?.sunlightSent ?? data?.[4]),
+    sunlightReceived: safeNumber(data?.sunlightReceived ?? data?.[5]),
+    lastClaimedWeek: safeNumber(data?.lastClaimedWeek ?? data?.[6]),
+  };
+}
+
+function buildLeaderboardEntry(userAddress, userData) {
+  return {
+    rank: 0,
+    address: userAddress,
+    name: shortAddress(userAddress),
+    streak: safeNumber(userData?.streakCount),
+    growth: safeNumber(userData?.growthLevel),
+    txs: safeNumber(userData?.totalActions),
+    score: calculateLeaderboardScore(userData),
+  };
+}
+
 export default function App() {
   const {
     provider,
@@ -128,7 +155,8 @@ export default function App() {
   const [busyAction, setBusyAction] = useState("");
   const [txHash, setTxHash] = useState("");
   const [sunlightTo, setSunlightTo] = useState("");
-  const [leaderboard, setLeaderboard] = useState(initialLeaderboard);
+  const [leaderboard, setLeaderboard] = useState([]);
+  const [leaderboardLoading, setLeaderboardLoading] = useState(false);
   const [toast, setToast] = useState(null);
   const [rpcStatus, setRpcStatus] = useState("ok");
   const [rpcError, setRpcError] = useState("");
@@ -153,15 +181,7 @@ export default function App() {
   }, [provider, activeChain]);
 
   const applyUserState = (data) => {
-    const nextUser = {
-      streakCount: safeNumber(data?.streakCount ?? data?.[0]),
-      lastWateredAt: safeNumber(data?.lastWateredAt ?? data?.[1]),
-      growthLevel: safeNumber(data?.growthLevel ?? data?.[2]),
-      totalActions: safeNumber(data?.totalActions ?? data?.[3]),
-      sunlightSent: safeNumber(data?.sunlightSent ?? data?.[4]),
-      sunlightReceived: safeNumber(data?.sunlightReceived ?? data?.[5]),
-      lastClaimedWeek: safeNumber(data?.lastClaimedWeek ?? data?.[6]),
-    };
+    const nextUser = mapContractUser(data);
     console.log("User data from contract:", data, "mapped:", nextUser);
 
     const parsed = {
@@ -174,12 +194,73 @@ export default function App() {
       lastClaimedWeek: nextUser.lastClaimedWeek,
     };
     setUser(parsed);
-    updateLeaderboard(parsed);
     return parsed;
   };
 
+  const refreshLeaderboard = async () => {
+    if (configError) return;
+
+    setLeaderboardLoading(true);
+    try {
+      const participantCount = Number(
+        await readClient.readContract({
+          address: contractAddress,
+          abi: CELO_BLOOM_ABI,
+          functionName: "getParticipantCount",
+        }),
+      );
+
+      if (!participantCount) {
+        setLeaderboard([]);
+        return;
+      }
+
+      const participantAddresses = [];
+      for (
+        let offset = 0;
+        offset < participantCount;
+        offset += LEADERBOARD_PAGE_SIZE
+      ) {
+        const page = await readClient.readContract({
+          address: contractAddress,
+          abi: CELO_BLOOM_ABI,
+          functionName: "getParticipants",
+          args: [offset, LEADERBOARD_PAGE_SIZE],
+        });
+        participantAddresses.push(...page);
+      }
+
+      const uniqueAddresses = [...new Set(participantAddresses)];
+      const leaderboardEntries = await Promise.all(
+        uniqueAddresses.map(async (participantAddress) => {
+          const participantData = await readClient.readContract({
+            address: contractAddress,
+            abi: CELO_BLOOM_ABI,
+            functionName: "users",
+            args: [participantAddress],
+          });
+          return buildLeaderboardEntry(
+            participantAddress,
+            mapContractUser(participantData),
+          );
+        }),
+      );
+
+      const sorted = leaderboardEntries
+        .sort((a, b) => b.score - a.score)
+        .map((entry, index) => ({ ...entry, rank: index + 1 }));
+
+      setLeaderboard(sorted);
+    } catch (error) {
+      console.error(error);
+      setLeaderboard([]);
+    } finally {
+      setLeaderboardLoading(false);
+    }
+  };
+
   const refreshUser = async () => {
-    if (!address) return;
+    if (!address || configError) return;
     const now = Date.now();
     const cached = userCacheRef.current;
     if (
@@ -243,32 +324,20 @@ export default function App() {
     return request;
   };
 
-  const updateLeaderboard = (latestUser) => {
-    const score =
-      safeNumber(latestUser?.growthLevel) * 10 +
-      safeNumber(latestUser?.totalActions) +
-      safeNumber(latestUser?.streakCount);
-    const entry = {
-      rank: 0,
-      name: shortAddress(address || "0x0"),
-      streak: safeNumber(latestUser?.streakCount),
-      growth: safeNumber(latestUser?.growthLevel),
-      txs: safeNumber(latestUser?.totalActions),
-      score,
-    };
-    const merged = [...initialLeaderboard, entry]
-      .filter((item) => item.name !== "0x0")
-      .sort((a, b) => (b.score || b.txs) - (a.score || a.txs))
-      .slice(0, 10)
-      .map((item, index) => ({ ...item, rank: index + 1 }));
-    setLeaderboard(merged);
-  };
-
   useEffect(() => {
     if (address) {
       refreshUser().catch(() => {});
     }
   }, [address, readClient]);
+
+  useEffect(() => {
+    if (configError) {
+      setLeaderboard([]);
+      return;
+    }
+
+    refreshLeaderboard().catch(() => {});
+  }, [configError, readClient]);
 
   useEffect(() => {
     if (!address || rpcStatus === "error") return;
@@ -284,12 +353,12 @@ export default function App() {
     : null;
   const alreadyWatered = lastWateredId === todayId;
   const isEligibleReward =
-    user?.streakCount >= 3 &&
+    user?.streakCount >= REWARD_MIN_STREAK &&
     (user?.lastClaimedWeek || 0) < getWeekId(Math.floor(Date.now() / 1000));
   const currentStage = stageForGrowth(user?.growthLevel || 1);
 
   const ensureWalletReady = () => {
-    if (!walletClient || !address) return false;
+    if (!walletClient || !address || configError) return false;
     return chainId === CHAIN_ID;
   };
 
@@ -319,6 +388,7 @@ export default function App() {
       userCacheRef.current = { address: "", timestamp: 0, data: null };
       inFlightRefreshRef.current = { address: "", promise: null };
       await refreshUser().catch(() => {});
+      await refreshLeaderboard().catch(() => {});
       setToast({
         status: "success",
         message: "Success - Plant watered",
@@ -354,6 +424,7 @@ export default function App() {
       userCacheRef.current = { address: "", timestamp: 0, data: null };
       inFlightRefreshRef.current = { address: "", promise: null };
       await refreshUser().catch(() => {});
+      await refreshLeaderboard().catch(() => {});
       setSunlightTo("");
     } catch (error) {
       console.error(error);
@@ -378,6 +449,7 @@ export default function App() {
       userCacheRef.current = { address: "", timestamp: 0, data: null };
       inFlightRefreshRef.current = { address: "", promise: null };
       await refreshUser().catch(() => {});
+      await refreshLeaderboard().catch(() => {});
     } catch (error) {
       console.error(error);
     } finally {
@@ -458,7 +530,11 @@ export default function App() {
                 className="btn btn-accent"
                 onClick={handleWater}
                 disabled={
-                  busyAction || alreadyWatered || showConnect || chainWarning
+                  busyAction ||
+                  alreadyWatered ||
+                  showConnect ||
+                  chainWarning ||
+                  !!configError
                 }
               >
                 {alreadyWatered
@@ -486,10 +562,10 @@ export default function App() {
                 Switch to {networkLabel} in MiniPay to continue.
               </div>
             ) : null}
+            {configError ? <div className="notice">{configError}</div> : null}
             {rpcStatus === "error" ? (
               <div className="notice">
-                {rpcError} Use a working Alfajores RPC and restart the dev
-                server.
+                {rpcError} Use a working RPC URL and restart the dev server.
               </div>
             ) : null}
             <div className="chain-actions">
@@ -517,7 +593,7 @@ export default function App() {
               <button
                 className="btn btn-secondary"
                 onClick={refreshUser}
-                disabled={!provider || !address}
+                disabled={!provider || !address || !!configError}
               >
                 Retry RPC
               </button>
@@ -541,9 +617,9 @@ export default function App() {
               <div className="tree-stage">
                 <span className="stage-label">{currentStage}</span>
                 <span className="stage-progress">
-                  Next milestone: {milestoneLabels[3] || "Seedling"} /{" "}
-                  {milestoneLabels[7] || "Sapling"} /{" "}
-                  {milestoneLabels[14] || "Tree"}
+                  Next milestone: {MILESTONE_LABELS[3] || "Seedling"} /{" "}
+                  {MILESTONE_LABELS[7] || "Sapling"} /{" "}
+                  {MILESTONE_LABELS[14] || "Tree"}
                 </span>
               </div>
             </div>
@@ -584,13 +660,13 @@ export default function App() {
             </button>
           </div>
           <div className="milestones">
-            {[3, 7, 14].map((days) => (
+            {STREAK_MILESTONES.map((days) => (
               <div
                 key={days}
                 className={`milestone ${user?.streakCount >= days ? "active" : ""}`}
               >
                 <span>{days} days</span>
-                <strong>{milestoneLabels[days]}</strong>
+                <strong>{MILESTONE_LABELS[days]}</strong>
               </div>
             ))}
           </div>
@@ -599,15 +675,19 @@ export default function App() {
         <section className="card reward">
           <h2>Weekly Reward</h2>
           <p>
-            Keep a 3-day streak to unlock a micro cUSD reward. Claiming triggers
-            an onchain transaction.
+            Keep a {REWARD_MIN_STREAK}-day streak to unlock a micro cUSD reward.
+            Claiming triggers an onchain transaction.
           </p>
           <div className="reward-action">
             <button
               className="btn btn-primary"
               onClick={handleClaim}
               disabled={
-                busyAction || !isEligibleReward || showConnect || chainWarning
+                busyAction ||
+                !isEligibleReward ||
+                showConnect ||
+                chainWarning ||
+                !!configError
               }
             >
               {busyAction === "claim"
@@ -616,7 +696,9 @@ export default function App() {
                   ? "Claim Reward"
                   : "Not Eligible Yet"}
             </button>
-            <span className="reward-hint">Minimum streak: 3 days</span>
+            <span className="reward-hint">
+              Minimum streak: {REWARD_MIN_STREAK} days
+            </span>
           </div>
         </section>
 
@@ -633,7 +715,9 @@ export default function App() {
             <button
               className="btn btn-secondary"
               onClick={handleSunlight}
-              disabled={busyAction || showConnect || chainWarning}
+              disabled={
+                busyAction || showConnect || chainWarning || !!configError
+              }
             >
               {busyAction === "sunlight" ? "Sending..." : "Send Sunlight"}
             </button>
@@ -643,15 +727,30 @@ export default function App() {
         <section className="card leaderboard">
           <h2>Great Forest Leaderboard</h2>
           <div className="leaderboard-list">
-            {leaderboard.map((entry) => (
-              <div key={entry.rank} className="leaderboard-row">
-                <span className="rank">#{entry.rank}</span>
-                <span className="name">{entry.name}</span>
-                <span className="metric">Streak {entry.streak}</span>
-                <span className="metric">Growth {entry.growth}</span>
-                <span className="metric">Txs {entry.txs}</span>
+            {leaderboardLoading ? (
+              <div className="leaderboard-row">
+                <span className="name">Loading leaderboard...</span>
               </div>
-            ))}
+            ) : leaderboard.length === 0 ? (
+              <div className="leaderboard-row">
+                <span className="name">
+                  No participants yet. Be the first to grow a tree.
+                </span>
+              </div>
+            ) : (
+              leaderboard.map((entry) => (
+                <div
+                  key={entry.address || entry.rank}
+                  className="leaderboard-row"
+                >
+                  <span className="rank">#{entry.rank}</span>
+                  <span className="name">{entry.name}</span>
+                  <span className="metric">Streak {entry.streak}</span>
+                  <span className="metric">Growth {entry.growth}</span>
+                  <span className="metric">Txs {entry.txs}</span>
+                </div>
+              ))
+            )}
           </div>
         </section>
       </main>

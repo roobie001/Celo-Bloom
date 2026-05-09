@@ -10,8 +10,8 @@ module.exports = {
   solidity: "0.8.20",
   networks: {
     alfajores: {
-      url: alfajoresRpc,
-      chainId: 44787,
+      url: process.env.ALFAJORES_RPC_URL || "https://forno.celo-testnet.org",
+      chainId: 11142220,
       accounts: deployerKey ? [deployerKey] : [],
     },
     celo: {
