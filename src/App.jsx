@@ -89,6 +89,27 @@ function formatTimestamp(tsSeconds) {
   return date.toLocaleString();
 }
 
+function truncateWalletAddress(value) {
+  if (!value || value.length < 10) return value || "";
+  return `${value.slice(0, 6)}...${value.slice(-4)}`;
+}
+
+function formatTimeAgo(timestampMs, nowMs) {
+  const diffMs = Math.max(0, nowMs - timestampMs);
+  const diffMinutes = Math.floor(diffMs / 60000);
+
+  if (diffMinutes < 1) return "just now";
+  if (diffMinutes === 1) return "1 min ago";
+  if (diffMinutes < 60) return `${diffMinutes} mins ago`;
+
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours === 1) return "1 hour ago";
+  if (diffHours < 24) return `${diffHours} hours ago`;
+
+  const diffDays = Math.floor(diffHours / 24);
+  return diffDays === 1 ? "1 day ago" : `${diffDays} days ago`;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -155,6 +176,10 @@ export default function App() {
   const [busyAction, setBusyAction] = useState("");
   const [txHash, setTxHash] = useState("");
   const [sunlightTo, setSunlightTo] = useState("");
+  const [sunlightError, setSunlightError] = useState("");
+  const [sunlightSuccess, setSunlightSuccess] = useState(null);
+  const [recentSunlightSent, setRecentSunlightSent] = useState([]);
+  const [relativeTimeNow, setRelativeTimeNow] = useState(Date.now());
   const [leaderboard, setLeaderboard] = useState([]);
   const [leaderboardLoading, setLeaderboardLoading] = useState(false);
   const [toast, setToast] = useState(null);
@@ -356,6 +381,34 @@ export default function App() {
     user?.streakCount >= REWARD_MIN_STREAK &&
     (user?.lastClaimedWeek || 0) < getWeekId(Math.floor(Date.now() / 1000));
   const currentStage = stageForGrowth(user?.growthLevel || 1);
+  const streakCount = user?.streakCount || 0;
+
+  let nextMilestoneLabel = "first reward";
+  let daysToNextMilestone = Math.max(0, 3 - streakCount);
+  let progressStart = 0;
+  let progressEnd = 3;
+
+  if (streakCount >= 7) {
+    nextMilestoneLabel = "Tree";
+    daysToNextMilestone = Math.max(0, 14 - streakCount);
+    progressStart = 7;
+    progressEnd = 14;
+  } else if (streakCount >= 3) {
+    nextMilestoneLabel = "Sapling";
+    daysToNextMilestone = Math.max(0, 7 - streakCount);
+    progressStart = 3;
+    progressEnd = 7;
+  }
+
+  const streakProgress = Math.min(
+    100,
+    Math.max(
+      0,
+      ((Math.min(streakCount, progressEnd) - progressStart) /
+        (progressEnd - progressStart)) *
+        100,
+    ),
+  );
 
   const ensureWalletReady = () => {
     if (!walletClient || !address || configError) return false;
@@ -408,7 +461,15 @@ export default function App() {
 
   const handleSunlight = async () => {
     if (!ensureWalletReady()) return;
-    if (!sunlightTo) return;
+    const trimmedSunlightTo = sunlightTo.trim();
+    if (!trimmedSunlightTo) return;
+    if (!isAddress(trimmedSunlightTo)) {
+      setSunlightError("Invalid address");
+      setSunlightSuccess(null);
+      return;
+    }
+
+    setSunlightError("");
     setBusyAction("sunlight");
     setTxHash("");
     try {
@@ -416,7 +477,7 @@ export default function App() {
         address: contractAddress,
         abi: CELO_BLOOM_ABI,
         functionName: "sendSunlight",
-        args: [sunlightTo],
+        args: [trimmedSunlightTo],
         account: address,
       });
       setTxHash(hash);
@@ -425,9 +486,19 @@ export default function App() {
       inFlightRefreshRef.current = { address: "", promise: null };
       await refreshUser().catch(() => {});
       await refreshLeaderboard().catch(() => {});
-      setSunlightTo("");
+      setSunlightSuccess({ address: trimmedSunlightTo });
+      setRecentSunlightSent((current) =>
+        [
+          {
+            address: trimmedSunlightTo,
+            sentAt: Date.now(),
+          },
+          ...current,
+        ].slice(0, 3),
+      );
     } catch (error) {
       console.error(error);
+      setSunlightSuccess(null);
     } finally {
       setBusyAction("");
     }
@@ -472,6 +543,23 @@ export default function App() {
     }, 4500);
     return () => clearTimeout(timeout);
   }, [toast]);
+
+  useEffect(() => {
+    if (!sunlightSuccess) return;
+    const timeout = setTimeout(() => {
+      setSunlightSuccess(null);
+      setSunlightTo("");
+    }, 4000);
+    return () => clearTimeout(timeout);
+  }, [sunlightSuccess]);
+
+  useEffect(() => {
+    if (!recentSunlightSent.length) return;
+    const interval = setInterval(() => {
+      setRelativeTimeNow(Date.now());
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [recentSunlightSent.length]);
 
   return (
     <div className="app">
@@ -631,7 +719,34 @@ export default function App() {
           <div className="streak-grid">
             <div className="streak-stat">
               <span className="label">Current Streak</span>
-              <strong>{user?.streakCount || 0} days</strong>
+              <strong>{streakCount} days</strong>
+              <span className="label" style={{ letterSpacing: "0.08em" }}>
+                {daysToNextMilestone} days to {nextMilestoneLabel}
+              </span>
+              <div
+                aria-hidden="true"
+                style={{
+                  height: "8px",
+                  borderRadius: "999px",
+                  background: "rgba(140, 255, 205, 0.12)",
+                  overflow: "hidden",
+                  marginTop: "4px",
+                }}
+              >
+                <div
+                  style={{
+                    width: `${streakProgress}%`,
+                    height: "100%",
+                    borderRadius: "999px",
+                    background: "linear-gradient(120deg, #ffd976, #ffb54a)",
+                    boxShadow: "0 0 14px rgba(255, 196, 82, 0.28)",
+                    transition: "width 0.3s ease",
+                  }}
+                />
+              </div>
+              {user && !alreadyWatered ? (
+                <div className="notice">⚠ Water today or lose your streak</div>
+              ) : null}
             </div>
             <div className="streak-stat">
               <span className="label">Growth Level</span>
@@ -710,8 +825,18 @@ export default function App() {
               type="text"
               placeholder="Friend wallet address"
               value={sunlightTo}
-              onChange={(event) => setSunlightTo(event.target.value)}
+              onChange={(event) => {
+                setSunlightTo(event.target.value);
+                if (sunlightError) {
+                  setSunlightError("");
+                }
+              }}
             />
+            {sunlightError ? (
+              <div style={{ color: "#ff7b7b", fontSize: "12px" }}>
+                {sunlightError}
+              </div>
+            ) : null}
             <button
               className="btn btn-secondary"
               onClick={handleSunlight}
@@ -722,6 +847,55 @@ export default function App() {
               {busyAction === "sunlight" ? "Sending..." : "Send Sunlight"}
             </button>
           </div>
+          {sunlightSuccess ? (
+            <div>
+              <div style={{ color: "var(--text)", fontSize: "13px" }}>
+                ☀ Sunlight sent to{" "}
+                {truncateWalletAddress(sunlightSuccess.address)}
+              </div>
+              <div style={{ color: "var(--accent)", fontSize: "12px" }}>
+                Your activity score +1
+              </div>
+            </div>
+          ) : null}
+          {recentSunlightSent.length ? (
+            <div>
+              <div
+                style={{
+                  fontSize: "11px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.2em",
+                  color: "var(--muted)",
+                  marginBottom: "8px",
+                }}
+              >
+                Recent Sunlight Sent
+              </div>
+              <div
+                style={{ display: "flex", flexDirection: "column", gap: "8px" }}
+              >
+                {recentSunlightSent.map((entry) => (
+                  <div
+                    key={`${entry.address}-${entry.sentAt}`}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: "12px",
+                      fontSize: "12px",
+                      color: "var(--muted)",
+                      padding: "10px 12px",
+                      borderRadius: "10px",
+                      background: "rgba(5, 20, 18, 0.7)",
+                      border: "1px solid rgba(124, 255, 194, 0.08)",
+                    }}
+                  >
+                    <span>{truncateWalletAddress(entry.address)}</span>
+                    <span>{formatTimeAgo(entry.sentAt, relativeTimeNow)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </section>
 
         <section className="card leaderboard">
