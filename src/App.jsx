@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
+import { JsonRpcProvider } from "ethers";
 import {
   createPublicClient,
   createWalletClient,
@@ -12,7 +13,6 @@ import {
   MILESTONE_LABELS,
   REWARD_MIN_STREAK,
   STREAK_MILESTONES,
-  stageForGrowth,
 } from "./config/gameConfig";
 import { useMiniPay } from "./hooks/useMiniPay";
 import { shortAddress } from "./utils/format";
@@ -68,6 +68,9 @@ const activeChain = {
 };
 
 const LEADERBOARD_PAGE_SIZE = 20;
+const LEADERBOARD_VISIBLE_COUNT = 5;
+const ENS_RPC_URL = "https://cloudflare-eth.com";
+const ensProvider = new JsonRpcProvider(ENS_RPC_URL);
 
 function safeNumber(value) {
   if (value === undefined || value === null) return 0;
@@ -108,6 +111,70 @@ function formatTimeAgo(timestampMs, nowMs) {
 
   const diffDays = Math.floor(diffHours / 24);
   return diffDays === 1 ? "1 day ago" : `${diffDays} days ago`;
+}
+
+function getTreeStageByStreak(streakDays) {
+  if (streakDays >= 14) return "tree";
+  if (streakDays >= 7) return "sapling";
+  if (streakDays >= 3) return "seedling";
+  return "seed";
+}
+
+function renderTreeStageSvg(stage) {
+  const trunk = "#7b4f2b";
+  const branch = "#8d5c34";
+
+  if (stage === "tree") {
+    return (
+      <svg viewBox="0 0 120 160" width="120" height="160" aria-hidden="true">
+        <circle cx="60" cy="40" r="28" fill="#2d8c4d" />
+        <circle cx="38" cy="58" r="24" fill="#349a54" />
+        <circle cx="82" cy="58" r="24" fill="#2f7f48" />
+        <rect x="50" y="84" width="20" height="48" rx="8" fill={trunk} />
+        <line x1="50" y1="96" x2="32" y2="88" stroke={branch} strokeWidth="5" strokeLinecap="round" />
+        <line x1="50" y1="108" x2="28" y2="104" stroke={branch} strokeWidth="5" strokeLinecap="round" />
+        <line x1="50" y1="120" x2="34" y2="122" stroke={branch} strokeWidth="5" strokeLinecap="round" />
+        <line x1="70" y1="96" x2="88" y2="88" stroke={branch} strokeWidth="5" strokeLinecap="round" />
+        <line x1="70" y1="108" x2="92" y2="104" stroke={branch} strokeWidth="5" strokeLinecap="round" />
+        <line x1="70" y1="120" x2="86" y2="122" stroke={branch} strokeWidth="5" strokeLinecap="round" />
+        <line x1="56" y1="132" x2="48" y2="142" stroke="#5f3d20" strokeWidth="4" strokeLinecap="round" />
+        <line x1="60" y1="132" x2="60" y2="145" stroke="#5f3d20" strokeWidth="4" strokeLinecap="round" />
+        <line x1="64" y1="132" x2="72" y2="142" stroke="#5f3d20" strokeWidth="4" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (stage === "sapling") {
+    return (
+      <svg viewBox="0 0 120 160" width="120" height="160" aria-hidden="true">
+        <circle cx="60" cy="46" r="24" fill="#47b866" />
+        <circle cx="60" cy="68" r="20" fill="#2f9750" />
+        <rect x="52" y="88" width="16" height="38" rx="7" fill={trunk} />
+        <line x1="52" y1="98" x2="38" y2="90" stroke={branch} strokeWidth="4" strokeLinecap="round" />
+        <line x1="52" y1="110" x2="40" y2="110" stroke={branch} strokeWidth="4" strokeLinecap="round" />
+        <line x1="68" y1="98" x2="82" y2="90" stroke={branch} strokeWidth="4" strokeLinecap="round" />
+        <line x1="68" y1="110" x2="80" y2="110" stroke={branch} strokeWidth="4" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (stage === "seedling") {
+    return (
+      <svg viewBox="0 0 120 160" width="120" height="160" aria-hidden="true">
+        <ellipse cx="60" cy="52" rx="18" ry="28" fill="#63c67a" />
+        <rect x="54" y="82" width="12" height="32" rx="6" fill={trunk} />
+        <line x1="54" y1="94" x2="44" y2="88" stroke={branch} strokeWidth="4" strokeLinecap="round" />
+        <line x1="66" y1="94" x2="76" y2="88" stroke={branch} strokeWidth="4" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 120 160" width="120" height="160" aria-hidden="true">
+      <ellipse cx="60" cy="72" rx="20" ry="14" fill="#6f9f72" />
+      <rect x="55" y="86" width="10" height="18" rx="5" fill={trunk} />
+    </svg>
+  );
 }
 
 function sleep(ms) {
@@ -182,6 +249,28 @@ export default function App() {
   const [relativeTimeNow, setRelativeTimeNow] = useState(Date.now());
   const [leaderboard, setLeaderboard] = useState([]);
   const [leaderboardLoading, setLeaderboardLoading] = useState(false);
+  const [leaderboardIdentityMap, setLeaderboardIdentityMap] = useState({});
+  const [displayedTreeStage, setDisplayedTreeStage] = useState("seed");
+  const [treeStageVisible, setTreeStageVisible] = useState(true);
+  const [onboardingStep, setOnboardingStep] = useState(0);
+  const [claimCount, setClaimCount] = useState(() => {
+    if (typeof window === "undefined") return 0;
+    try {
+      const stored = Number(window.localStorage.getItem("cb_claim_count") || 0);
+      return Number.isFinite(stored) ? stored : 0;
+    } catch {
+      return 0;
+    }
+  });
+  const [claimSuccess, setClaimSuccess] = useState(false);
+  const [onboardingDismissed, setOnboardingDismissed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return window.localStorage.getItem("cb_onboarded") === "true";
+    } catch {
+      return false;
+    }
+  });
   const [toast, setToast] = useState(null);
   const [rpcStatus, setRpcStatus] = useState("ok");
   const [rpcError, setRpcError] = useState("");
@@ -365,6 +454,65 @@ export default function App() {
   }, [configError, readClient]);
 
   useEffect(() => {
+    if (!leaderboard.length) {
+      setLeaderboardIdentityMap({});
+      return;
+    }
+
+    let cancelled = false;
+    const addressesToResolve = leaderboard
+      .map((entry) => entry.address)
+      .filter(Boolean);
+
+    setLeaderboardIdentityMap((current) => {
+      const next = { ...current };
+      for (const entryAddress of addressesToResolve) {
+        if (!next[entryAddress]) {
+          next[entryAddress] = { status: "loading", value: "" };
+        }
+      }
+      return next;
+    });
+
+    Promise.all(
+      addressesToResolve.map(async (entryAddress) => {
+        try {
+          const ensName = await ensProvider.lookupAddress(entryAddress);
+          return [
+            entryAddress,
+            {
+              status: "resolved",
+              value: ensName || "",
+            },
+          ];
+        } catch (error) {
+          console.error(error);
+          return [
+            entryAddress,
+            {
+              status: "resolved",
+              value: "",
+            },
+          ];
+        }
+      }),
+    ).then((results) => {
+      if (cancelled) return;
+      setLeaderboardIdentityMap((current) => {
+        const next = { ...current };
+        for (const [entryAddress, result] of results) {
+          next[entryAddress] = result;
+        }
+        return next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [leaderboard]);
+
+  useEffect(() => {
     if (!address || rpcStatus === "error") return;
     const interval = setInterval(() => {
       refreshUser().catch(() => {});
@@ -380,8 +528,8 @@ export default function App() {
   const isEligibleReward =
     user?.streakCount >= REWARD_MIN_STREAK &&
     (user?.lastClaimedWeek || 0) < getWeekId(Math.floor(Date.now() / 1000));
-  const currentStage = stageForGrowth(user?.growthLevel || 1);
   const streakCount = user?.streakCount || 0;
+  const milestoneTreeStage = getTreeStageByStreak(streakCount);
 
   let nextMilestoneLabel = "first reward";
   let daysToNextMilestone = Math.max(0, 3 - streakCount);
@@ -409,6 +557,17 @@ export default function App() {
         100,
     ),
   );
+  const activeMilestoneStage =
+    streakCount >= 14 ? 14 : streakCount >= 7 ? 7 : streakCount >= 3 ? 3 : 0;
+  const rewardProgress = Math.min(100, Math.max(0, (Math.min(streakCount, 3) / 3) * 100));
+  const hasClaimedCurrentReward =
+    streakCount >= REWARD_MIN_STREAK && !isEligibleReward;
+  const rewardContext = hasClaimedCurrentReward
+    ? "Come back tomorrow for your next reward."
+    : isEligibleReward
+      ? "You've earned it. Claim your cUSD reward below."
+      : "Keep your streak going - reward unlocks at day 3.";
+  const totalEarnedLabel = (claimCount * 0.01).toFixed(2);
 
   const ensureWalletReady = () => {
     if (!walletClient || !address || configError) return false;
@@ -508,6 +667,7 @@ export default function App() {
     if (!ensureWalletReady()) return;
     setBusyAction("claim");
     setTxHash("");
+    setClaimSuccess(false);
     try {
       const hash = await walletClient.writeContract({
         address: contractAddress,
@@ -521,6 +681,12 @@ export default function App() {
       inFlightRefreshRef.current = { address: "", promise: null };
       await refreshUser().catch(() => {});
       await refreshLeaderboard().catch(() => {});
+      const nextClaimCount = claimCount + 1;
+      setClaimCount(nextClaimCount);
+      setClaimSuccess(true);
+      try {
+        window.localStorage.setItem("cb_claim_count", String(nextClaimCount));
+      } catch {}
     } catch (error) {
       console.error(error);
     } finally {
@@ -535,6 +701,42 @@ export default function App() {
     NETWORKS[chainId]?.name || (chainId ? `Chain ${chainId}` : "Unknown");
   const explorerBase =
     import.meta.env.VITE_TX_EXPLORER || `${networkConfig.explorer}/tx`;
+  const showOnboardingOverlay =
+    !!address &&
+    status === "connected" &&
+    !!user &&
+    user.totalActions === 0 &&
+    !onboardingDismissed;
+  const visibleLeaderboardEntries = leaderboard.slice(
+    0,
+    LEADERBOARD_VISIBLE_COUNT,
+  );
+  const currentUserLeaderboardEntry = address
+    ? leaderboard.find(
+        (entry) => entry.address?.toLowerCase() === address.toLowerCase(),
+      )
+    : null;
+  const isCurrentUserVisible = currentUserLeaderboardEntry
+    ? visibleLeaderboardEntries.some(
+        (entry) =>
+          entry.address?.toLowerCase() ===
+          currentUserLeaderboardEntry.address?.toLowerCase(),
+      )
+    : false;
+
+  const getLeaderboardIdentity = (entryAddress) => {
+    const identity = leaderboardIdentityMap[entryAddress];
+    if (!identity || identity.status === "loading") return "...";
+    return identity.value || truncateWalletAddress(entryAddress);
+  };
+
+  const dismissOnboarding = () => {
+    setOnboardingDismissed(true);
+    setOnboardingStep(0);
+    try {
+      window.localStorage.setItem("cb_onboarded", "true");
+    } catch {}
+  };
 
   useEffect(() => {
     if (!toast || toast.status !== "success") return;
@@ -560,6 +762,127 @@ export default function App() {
     }, 30000);
     return () => clearInterval(interval);
   }, [recentSunlightSent.length]);
+
+  useEffect(() => {
+    if (!claimSuccess) return;
+    const timeout = setTimeout(() => {
+      setClaimSuccess(false);
+    }, 4000);
+    return () => clearTimeout(timeout);
+  }, [claimSuccess]);
+
+  useEffect(() => {
+    if (displayedTreeStage === milestoneTreeStage) return;
+
+    setTreeStageVisible(false);
+    const timeout = setTimeout(() => {
+      setDisplayedTreeStage(milestoneTreeStage);
+      setTreeStageVisible(true);
+    }, 180);
+
+    return () => clearTimeout(timeout);
+  }, [displayedTreeStage, milestoneTreeStage]);
+
+  useEffect(() => {
+    if (onboardingDismissed || !user || user.totalActions !== 0 || !address) {
+      setOnboardingStep(0);
+    }
+  }, [address, onboardingDismissed, user]);
+
+  const onboardingSteps = [
+    {
+      headline: "Water your tree daily.",
+      body: "One onchain action per day keeps your streak alive. Miss a day and it resets to zero.",
+      visual: (
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            minHeight: "170px",
+          }}
+        >
+          {renderTreeStageSvg("seed")}
+        </div>
+      ),
+    },
+    {
+      headline: "Watch it grow.",
+      body: "Day 3 -> Seedling. Day 7 -> Sapling. Day 14 -> Tree. Each stage is a real onchain milestone.",
+      visual: (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "8px",
+            flexWrap: "wrap",
+            minHeight: "170px",
+          }}
+        >
+          {["Seed", "Seedling", "Sapling", "Tree"].map((label, index) => (
+            <div
+              key={label}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+              }}
+            >
+              <div
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: "999px",
+                  background: "rgba(140, 255, 205, 0.12)",
+                  border: "1px solid rgba(140, 255, 205, 0.2)",
+                  color: "var(--text)",
+                  fontSize: "12px",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {label}
+              </div>
+              {index < 3 ? (
+                <span style={{ color: "var(--accent)", fontSize: "14px" }}>
+                  -&gt;
+                </span>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ),
+    },
+    {
+      headline: "Earn as you grow.",
+      body: "Hit a 3-day streak and claim a micro cUSD reward. Small but real - every claim is an onchain transaction.",
+      visual: (
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            minHeight: "170px",
+          }}
+        >
+          <div
+            style={{
+              padding: "12px 18px",
+              borderRadius: "999px",
+              background: "rgba(124, 255, 194, 0.12)",
+              border: "1px solid rgba(124, 255, 194, 0.3)",
+              color: "var(--accent)",
+              fontWeight: 700,
+              letterSpacing: "0.04em",
+            }}
+          >
+            0.01 cUSD
+          </div>
+        </div>
+      ),
+    },
+  ];
+  const currentOnboardingStep = onboardingSteps[onboardingStep];
+  const isLastOnboardingStep = onboardingStep === onboardingSteps.length - 1;
 
   return (
     <div className="app">
@@ -697,13 +1020,19 @@ export default function App() {
 
           <div className="hero-right">
             <div className="tree-card">
-              <div className={`tree tree-${currentStage}`}>
-                <div className="tree-core" />
-                <div className="tree-canopy" />
-                <div className="tree-glow" />
+              <div
+                className="tree"
+                style={{
+                  opacity: treeStageVisible ? 1 : 0,
+                  transition: "opacity 0.6s ease",
+                }}
+              >
+                {renderTreeStageSvg(displayedTreeStage)}
               </div>
               <div className="tree-stage">
-                <span className="stage-label">{currentStage}</span>
+                <span className="stage-label">
+                  {displayedTreeStage.toUpperCase()}
+                </span>
                 <span className="stage-progress">
                   Next milestone: {MILESTONE_LABELS[3] || "Seedling"} /{" "}
                   {MILESTONE_LABELS[7] || "Sapling"} /{" "}
@@ -778,7 +1107,15 @@ export default function App() {
             {STREAK_MILESTONES.map((days) => (
               <div
                 key={days}
-                className={`milestone ${user?.streakCount >= days ? "active" : ""}`}
+                className={`milestone ${activeMilestoneStage === days ? "active" : ""}`}
+                style={
+                  activeMilestoneStage === days
+                    ? {
+                        boxShadow: "0 0 0 1px rgba(124, 255, 194, 0.18)",
+                        transform: "translateY(-1px)",
+                      }
+                    : undefined
+                }
               >
                 <span>{days} days</span>
                 <strong>{MILESTONE_LABELS[days]}</strong>
@@ -789,10 +1126,51 @@ export default function App() {
 
         <section className="card reward">
           <h2>Weekly Reward</h2>
-          <p>
-            Keep a {REWARD_MIN_STREAK}-day streak to unlock a micro cUSD reward.
-            Claiming triggers an onchain transaction.
-          </p>
+          <p>{rewardContext}</p>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "4px",
+              padding: "14px 16px",
+              borderRadius: "14px",
+              background: "rgba(4, 18, 16, 0.7)",
+              border: "1px solid rgba(140, 255, 205, 0.18)",
+            }}
+          >
+            <strong style={{ fontSize: "24px", lineHeight: 1.1 }}>
+              0.01 cUSD
+            </strong>
+            <span style={{ color: "var(--muted)", fontSize: "12px" }}>
+              &asymp; real money on Celo mainnet
+            </span>
+            <span style={{ color: "var(--accent)", fontSize: "12px" }}>
+              Total earned: {totalEarnedLabel} cUSD
+            </span>
+          </div>
+          <div
+            aria-hidden="true"
+            style={{
+              height: "8px",
+              borderRadius: "999px",
+              background: "rgba(140, 255, 205, 0.12)",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                width: `${rewardProgress}%`,
+                height: "100%",
+                borderRadius: "999px",
+                background: "linear-gradient(120deg, #7cffc2, #2aa06d)",
+                boxShadow: "0 0 14px rgba(56, 203, 138, 0.28)",
+                transition: "width 0.3s ease",
+              }}
+            />
+          </div>
+          <span className="reward-hint">
+            Reward progress: {Math.min(streakCount, 3)} / 3 days
+          </span>
           <div className="reward-action">
             <button
               className="btn btn-primary"
@@ -815,6 +1193,11 @@ export default function App() {
               Minimum streak: {REWARD_MIN_STREAK} days
             </span>
           </div>
+          {claimSuccess ? (
+            <div style={{ color: "var(--accent)", fontSize: "13px" }}>
+              ✓ Claimed! Check your wallet.
+            </div>
+          ) : null}
         </section>
 
         <section className="card sunlight">
@@ -912,22 +1295,234 @@ export default function App() {
                 </span>
               </div>
             ) : (
-              leaderboard.map((entry) => (
-                <div
-                  key={entry.address || entry.rank}
-                  className="leaderboard-row"
-                >
-                  <span className="rank">#{entry.rank}</span>
-                  <span className="name">{entry.name}</span>
-                  <span className="metric">Streak {entry.streak}</span>
-                  <span className="metric">Growth {entry.growth}</span>
-                  <span className="metric">Txs {entry.txs}</span>
-                </div>
-              ))
+              <>
+                {visibleLeaderboardEntries.map((entry) => {
+                  const isCurrentUser =
+                    address &&
+                    entry.address?.toLowerCase() === address.toLowerCase();
+
+                  return (
+                    <div
+                      key={entry.address || entry.rank}
+                      className="leaderboard-row"
+                    >
+                      <span className="rank">#{entry.rank}</span>
+                      <span
+                        className="name"
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "8px",
+                          minWidth: 0,
+                        }}
+                      >
+                        <span
+                          style={{
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {getLeaderboardIdentity(entry.address)}
+                        </span>
+                        {isCurrentUser ? (
+                          <span
+                            style={{
+                              fontSize: "11px",
+                              color: "var(--accent)",
+                              border: "1px solid rgba(124, 255, 194, 0.35)",
+                              background: "rgba(124, 255, 194, 0.12)",
+                              borderRadius: "999px",
+                              padding: "2px 8px",
+                              flexShrink: 0,
+                            }}
+                          >
+                            You
+                          </span>
+                        ) : null}
+                      </span>
+                      <span className="metric">Streak {entry.streak}</span>
+                      <span className="metric">Growth {entry.growth}</span>
+                      <span className="metric">Txs {entry.txs}</span>
+                    </div>
+                  );
+                })}
+                {currentUserLeaderboardEntry && !isCurrentUserVisible ? (
+                  <div
+                    style={{
+                      borderTop: "1px solid rgba(124, 255, 194, 0.15)",
+                      marginTop: "6px",
+                      paddingTop: "10px",
+                    }}
+                  >
+                    <div className="leaderboard-row">
+                      <span className="rank">
+                        #{currentUserLeaderboardEntry.rank}
+                      </span>
+                      <span
+                        className="name"
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "8px",
+                          minWidth: 0,
+                        }}
+                      >
+                        <span
+                          style={{
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {getLeaderboardIdentity(
+                            currentUserLeaderboardEntry.address,
+                          )}
+                        </span>
+                        <span
+                          style={{
+                            fontSize: "11px",
+                            color: "var(--accent)",
+                            border: "1px solid rgba(124, 255, 194, 0.35)",
+                            background: "rgba(124, 255, 194, 0.12)",
+                            borderRadius: "999px",
+                            padding: "2px 8px",
+                            flexShrink: 0,
+                          }}
+                        >
+                          You
+                        </span>
+                      </span>
+                      <span className="metric">
+                        Streak {currentUserLeaderboardEntry.streak}
+                      </span>
+                      <span className="metric">
+                        Growth {currentUserLeaderboardEntry.growth}
+                      </span>
+                      <span className="metric">
+                        Txs {currentUserLeaderboardEntry.txs}
+                      </span>
+                    </div>
+                  </div>
+                ) : null}
+              </>
             )}
           </div>
         </section>
       </main>
+
+      {showOnboardingOverlay ? (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 60,
+            background: "rgba(2, 10, 9, 0.82)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "24px",
+          }}
+        >
+          <div
+            style={{
+              width: "100%",
+              maxWidth: "540px",
+              background: "var(--card)",
+              border: "1px solid rgba(196, 255, 228, 0.2)",
+              borderRadius: "24px",
+              padding: "24px",
+              boxShadow: "0 24px 60px rgba(4, 12, 14, 0.45)",
+              display: "flex",
+              flexDirection: "column",
+              gap: "18px",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: "12px",
+              }}
+            >
+              <span className="eyebrow">
+                Step {onboardingStep + 1} of {onboardingSteps.length}
+              </span>
+              <div
+                style={{
+                  display: "flex",
+                  gap: "8px",
+                }}
+              >
+                {onboardingSteps.map((_, index) => (
+                  <span
+                    key={index}
+                    style={{
+                      width: "8px",
+                      height: "8px",
+                      borderRadius: "999px",
+                      background:
+                        index === onboardingStep
+                          ? "var(--accent)"
+                          : "rgba(140, 255, 205, 0.18)",
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div>{currentOnboardingStep.visual}</div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              <h2
+                style={{
+                  margin: 0,
+                  fontFamily: "var(--title-font)",
+                  fontSize: "28px",
+                }}
+              >
+                {currentOnboardingStep.headline}
+              </h2>
+              <p
+                style={{
+                  margin: 0,
+                  color: "var(--muted)",
+                  lineHeight: 1.7,
+                }}
+              >
+                {currentOnboardingStep.body}
+              </p>
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: "12px",
+                flexWrap: "wrap",
+              }}
+            >
+              <div style={{ color: "var(--muted)", fontSize: "12px" }}>
+                Learn the loop, then start your first streak.
+              </div>
+              <button
+                className="btn btn-primary"
+                onClick={() => {
+                  if (isLastOnboardingStep) {
+                    dismissOnboarding();
+                    return;
+                  }
+                  setOnboardingStep((step) => step + 1);
+                }}
+              >
+                {isLastOnboardingStep ? "Start Growing ->" : "Next"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {toast ? (
         <div className={`toast toast-${toast.status}`}>
