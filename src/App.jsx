@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
-import { JsonRpcProvider } from "ethers";
 import {
   createPublicClient,
   createWalletClient,
@@ -22,9 +21,6 @@ const RPC_URL = import.meta.env.VITE_CELO_RPC_URL;
 
 const NETWORKS = {
   42220: { name: "Celo Mainnet", explorer: "https://celoscan.io" },
-  44787: { name: "Celo Alfajores", explorer: "https://alfajores.celoscan.io" },
-  44844: { name: "Celo Sepolia", explorer: "https://sepolia.celoscan.io" },
-  11142220: { name: "Celo Sepolia", explorer: "https://sepolia.celoscan.io" },
 };
 
 const contractAddress = import.meta.env.VITE_BLOOM_ADDRESS?.trim() || "";
@@ -69,8 +65,6 @@ const activeChain = {
 
 const LEADERBOARD_PAGE_SIZE = 20;
 const LEADERBOARD_VISIBLE_COUNT = 5;
-const ENS_RPC_URL = "https://cloudflare-eth.com";
-const ensProvider = new JsonRpcProvider(ENS_RPC_URL);
 
 function safeNumber(value) {
   if (value === undefined || value === null) return 0;
@@ -249,7 +243,6 @@ export default function App() {
   const [relativeTimeNow, setRelativeTimeNow] = useState(Date.now());
   const [leaderboard, setLeaderboard] = useState([]);
   const [leaderboardLoading, setLeaderboardLoading] = useState(false);
-  const [leaderboardIdentityMap, setLeaderboardIdentityMap] = useState({});
   const [displayedTreeStage, setDisplayedTreeStage] = useState("seed");
   const [treeStageVisible, setTreeStageVisible] = useState(true);
   const [onboardingStep, setOnboardingStep] = useState(0);
@@ -454,65 +447,6 @@ export default function App() {
   }, [configError, readClient]);
 
   useEffect(() => {
-    if (!leaderboard.length) {
-      setLeaderboardIdentityMap({});
-      return;
-    }
-
-    let cancelled = false;
-    const addressesToResolve = leaderboard
-      .map((entry) => entry.address)
-      .filter(Boolean);
-
-    setLeaderboardIdentityMap((current) => {
-      const next = { ...current };
-      for (const entryAddress of addressesToResolve) {
-        if (!next[entryAddress]) {
-          next[entryAddress] = { status: "loading", value: "" };
-        }
-      }
-      return next;
-    });
-
-    Promise.all(
-      addressesToResolve.map(async (entryAddress) => {
-        try {
-          const ensName = await ensProvider.lookupAddress(entryAddress);
-          return [
-            entryAddress,
-            {
-              status: "resolved",
-              value: ensName || "",
-            },
-          ];
-        } catch (error) {
-          console.error(error);
-          return [
-            entryAddress,
-            {
-              status: "resolved",
-              value: "",
-            },
-          ];
-        }
-      }),
-    ).then((results) => {
-      if (cancelled) return;
-      setLeaderboardIdentityMap((current) => {
-        const next = { ...current };
-        for (const [entryAddress, result] of results) {
-          next[entryAddress] = result;
-        }
-        return next;
-      });
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [leaderboard]);
-
-  useEffect(() => {
     if (!address || rpcStatus === "error") return;
     const interval = setInterval(() => {
       refreshUser().catch(() => {});
@@ -567,7 +501,7 @@ export default function App() {
     : isEligibleReward
       ? "You've earned it. Claim your cUSD reward below."
       : "Keep your streak going - reward unlocks at day 3.";
-  const totalEarnedLabel = (claimCount * 0.01).toFixed(2);
+  const totalEarnedLabel = (claimCount * 0.000001).toFixed(6);
 
   const ensureWalletReady = () => {
     if (!walletClient || !address || configError) return false;
@@ -724,12 +658,6 @@ export default function App() {
       )
     : false;
 
-  const getLeaderboardIdentity = (entryAddress) => {
-    const identity = leaderboardIdentityMap[entryAddress];
-    if (!identity || identity.status === "loading") return "...";
-    return identity.value || truncateWalletAddress(entryAddress);
-  };
-
   const dismissOnboarding = () => {
     setOnboardingDismissed(true);
     setOnboardingStep(0);
@@ -875,7 +803,7 @@ export default function App() {
               letterSpacing: "0.04em",
             }}
           >
-            0.01 cUSD
+            0.000001 cUSD
           </div>
         </div>
       ),
@@ -1139,7 +1067,7 @@ export default function App() {
             }}
           >
             <strong style={{ fontSize: "24px", lineHeight: 1.1 }}>
-              0.01 cUSD
+              0.000001 cUSD
             </strong>
             <span style={{ color: "var(--muted)", fontSize: "12px" }}>
               &asymp; real money on Celo mainnet
@@ -1323,7 +1251,7 @@ export default function App() {
                             whiteSpace: "nowrap",
                           }}
                         >
-                          {getLeaderboardIdentity(entry.address)}
+                          {truncateWalletAddress(entry.address)}
                         </span>
                         {isCurrentUser ? (
                           <span
@@ -1375,7 +1303,7 @@ export default function App() {
                             whiteSpace: "nowrap",
                           }}
                         >
-                          {getLeaderboardIdentity(
+                          {truncateWalletAddress(
                             currentUserLeaderboardEntry.address,
                           )}
                         </span>
